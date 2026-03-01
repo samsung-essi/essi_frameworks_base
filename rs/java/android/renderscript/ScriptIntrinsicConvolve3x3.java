@@ -16,6 +16,8 @@
 
 package android.renderscript;
 
+import com.samsung.epic.Request;
+
 /**
  * Intrinsic for applying a 3x3 convolve to an allocation.
  *
@@ -27,6 +29,7 @@ package android.renderscript;
 public final class ScriptIntrinsicConvolve3x3 extends ScriptIntrinsic {
     private final float[] mValues = new float[9];
     private Allocation mInput;
+    private Request mScenario = null;
 
     private ScriptIntrinsicConvolve3x3(long id, RenderScript rs) {
         super(id, rs);
@@ -65,6 +68,8 @@ public final class ScriptIntrinsicConvolve3x3 extends ScriptIntrinsic {
         long id = rs.nScriptIntrinsicCreate(1, e.getID(rs));
         ScriptIntrinsicConvolve3x3 si = new ScriptIntrinsicConvolve3x3(id, rs);
         si.setCoefficients(f);
+        si.mScenario = new Request(2);
+        si.mScenario.acquire_lock();
         return si;
 
     }

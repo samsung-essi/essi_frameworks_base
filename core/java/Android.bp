@@ -578,6 +578,14 @@ cc_defaults {
     },
 }
 
+cc_library_shared {
+   name: "libepic_native",
+   srcs: [
+       "android/os/epic/*.aidl",
+   ],
+   defaults: ["incremental_default"],
+}
+
 cc_library {
     name: "libincremental_aidl-cpp",
     srcs: [

@@ -311,6 +311,9 @@ import com.android.modules.utils.ravenwood.RavenwoodHelper;
 import java.util.Map;
 import java.util.Objects;
 
+import android.os.epic.IEpicManager;
+import android.os.epic.EpicManager;
+
 /**
  * Manages all of the system services that can be returned by {@link Context#getSystemService}.
  * Used by {@link ContextImpl}.
@@ -701,6 +704,15 @@ public final class SystemServiceRegistry {
                 IThermalService thermalService = IThermalService.Stub.asInterface(thermalBinder);
                 return new PowerManager(ctx.getOuterContext(), powerService, thermalService,
                         ctx.mMainThread.getHandler());
+            }});
+
+        registerService(Context.EPIC_SERVICE, EpicManager.class,
+                new CachedServiceFetcher<EpicManager>() {
+            @Override
+            public EpicManager createService(ContextImpl ctx) throws ServiceNotFoundException {
+                IBinder b = ServiceManager.getServiceOrThrow(Context.EPIC_SERVICE);
+                IEpicManager service = IEpicManager.Stub.asInterface(b);
+                return new EpicManager(service);
             }});
 
         registerService(Context.PERFORMANCE_HINT_SERVICE, PerformanceHintManager.class,

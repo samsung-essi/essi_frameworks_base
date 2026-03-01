@@ -16,6 +16,8 @@
 
 package android.renderscript;
 
+import com.samsung.epic.Request;
+
 /**
  * Intrinsic Gausian blur filter. Applies a gaussian blur of the
  * specified radius to all elements of an allocation.
@@ -28,6 +30,7 @@ package android.renderscript;
 public final class ScriptIntrinsicBlur extends ScriptIntrinsic {
     private final float[] mValues = new float[9];
     private Allocation mInput;
+    private Request mScenario = null;
 
     private ScriptIntrinsicBlur(long id, RenderScript rs) {
         super(id, rs);
@@ -52,6 +55,8 @@ public final class ScriptIntrinsicBlur extends ScriptIntrinsic {
         long id = rs.nScriptIntrinsicCreate(5, e.getID(rs));
         ScriptIntrinsicBlur sib = new ScriptIntrinsicBlur(id, rs);
         sib.setRadius(5.f);
+        sib.mScenario = new Request(2);
+        sib.mScenario.acquire_lock();
         return sib;
     }
 

@@ -23,6 +23,8 @@ import android.filterfw.core.FilterFactory;
 import android.filterfw.core.FilterFunction;
 import android.filterfw.core.Frame;
 
+import com.samsung.epic.Request;
+
 /**
  * Effect subclass for effects based on a single Filter. Subclasses need only invoke the
  * constructor with the correct arguments to obtain an Effect implementation.
@@ -34,6 +36,7 @@ public class SingleFilterEffect extends FilterEffect {
     protected FilterFunction mFunction;
     protected String mInputName;
     protected String mOutputName;
+    private Request mScenario;
 
     /**
      * Constructs a new FilterFunctionEffect.
@@ -62,6 +65,9 @@ public class SingleFilterEffect extends FilterEffect {
         filter.initWithAssignmentList(finalParameters);
 
         mFunction = new FilterFunction(getFilterContext(), filter);
+
+        mScenario = new Request(1);
+        mScenario.acquire_lock();
     }
 
     @Override

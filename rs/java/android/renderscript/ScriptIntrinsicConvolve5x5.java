@@ -16,6 +16,8 @@
 
 package android.renderscript;
 
+import com.samsung.epic.Request;
+
 /**
  * Intrinsic for applying a 5x5 convolve to an allocation.
  *
@@ -27,6 +29,7 @@ package android.renderscript;
 public final class ScriptIntrinsicConvolve5x5 extends ScriptIntrinsic {
     private final float[] mValues = new float[25];
     private Allocation mInput;
+    private Request mScenario = null;
 
     private ScriptIntrinsicConvolve5x5(long id, RenderScript rs) {
         super(id, rs);
@@ -65,7 +68,10 @@ public final class ScriptIntrinsicConvolve5x5 extends ScriptIntrinsic {
         }
 
         long id = rs.nScriptIntrinsicCreate(4, e.getID(rs));
-        return new ScriptIntrinsicConvolve5x5(id, rs);
+        ScriptIntrinsicConvolve5x5 sib = new ScriptIntrinsicConvolve5x5(id, rs);
+        sib.mScenario = new Request(2);
+        sib.mScenario.acquire_lock();
+        return sib;
 
     }
 

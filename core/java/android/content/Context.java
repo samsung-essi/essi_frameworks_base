@@ -4919,6 +4919,13 @@ public abstract class Context {
     public static final String POWER_SERVICE = "power";
 
     /**
+     * @hide
+     * Use with {@link #getSystemService(String)} to retrieve a
+     * {@link com.samsung.epic.EpicManager} for controlling boost
+     */
+    public static final String EPIC_SERVICE = "epic";
+
+    /**
      * Use with {@link #getSystemService(String)} to retrieve a
      * {@link android.os.PowerStatsService} for accessing power stats
      * service.

@@ -200,12 +200,40 @@ java_defaults {
     },
 }
 
+soong_config_module_type {
+    name: "epic_java_defaults",
+    module_type: "java_defaults",
+    config_namespace: "epic",
+    variables: [
+        "vendor_hint",
+    ],
+    properties: [
+        "static_libs",
+    ],
+}
+
+soong_config_bool_variable {
+    name: "vendor_hint",
+}
+
+epic_java_defaults {
+    name: "epic_defaults",
+    soong_config_variables: {
+        vendor_hint: {
+            static_libs: [
+                "vendor.samsung_slsi.hardware.epic-V1.0-java"
+            ],
+        }
+    }
+}
+
 // Collection of classes that are generated from non-Java files that are not listed in
 // framework_srcs. These have no or very limited dependency to the framework.
 java_library {
     name: "framework-internal-utils",
     defaults: [
         "android.hardware.power-java_static",
+        "epic_defaults",
     ],
     static_libs: [
         "apex_aidl_interface-java",

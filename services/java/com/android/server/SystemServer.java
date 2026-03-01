@@ -102,6 +102,7 @@ import android.util.Pair;
 import android.util.Slog;
 import android.util.TimeUtils;
 import android.view.contentcapture.ContentCaptureManager;
+import android.os.epic.EpicManagerService;
 
 import com.android.i18n.timezone.ZoneInfoDb;
 import com.android.internal.R;
@@ -510,6 +511,7 @@ public final class SystemServer implements Dumpable {
 
     // TODO: remove all of these references by improving dependency resolution and boot phases
     private PowerManagerService mPowerManagerService;
+    private EpicManagerService mEpicManagerService;
     private ActivityManagerService mActivityManagerService;
     private UserManagerService mUserManagerService;
     private WindowManagerGlobalLock mWindowManagerGlobalLock;
@@ -1306,6 +1308,14 @@ public final class SystemServer implements Dumpable {
 
         t.traceBegin("StartThermalManager");
         mSystemServiceManager.startService(ThermalManagerService.class);
+        t.traceEnd();
+
+        // Epic manager needs to be started early because other services need it.
+        // Native daemons may be watching for it to be registered so it must be ready
+        // to handle incoming binder calls immediately (including being able to verify
+        // the permissions for those calls).
+        t.traceBegin("StartEpicManager");
+        mEpicManagerService = mSystemServiceManager.startService(EpicManagerService.class);
         t.traceEnd();
 
         // Now that the power manager has been started, let the activity manager
@@ -3250,6 +3260,10 @@ public final class SystemServer implements Dumpable {
         t.traceEnd();
 
         mSystemServiceManager.setSafeMode(safeMode);
+
+        t.traceBegin("MakeEpicManagerServiceReady");
+        mEpicManagerService.systemReady();
+        t.traceEnd();
 
         // Start device specific services
         t.traceBegin("StartDeviceSpecificServices");

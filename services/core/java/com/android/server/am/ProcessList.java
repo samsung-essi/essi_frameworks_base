@@ -178,6 +178,8 @@ import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
+import com.samsung.epic.Request;
+
 /**
  * Activity manager code dealing with processes.
  */
@@ -570,6 +572,10 @@ public final class ProcessList implements ProcessStateController.ProcessLruUpdat
     private final int[] mZygoteSigChldMessage = new int[3];
 
     ActivityManagerGlobalLock mProcLock;
+
+    /* EPIC Request Object
+     */
+    private Request mScenario = null;
 
     private static final String PROPERTY_APPLY_SDK_SANDBOX_AUDIT_RESTRICTIONS =
             "apply_sdk_sandbox_audit_restrictions";
@@ -2609,6 +2615,20 @@ public final class ProcessList implements ProcessStateController.ProcessLruUpdat
 
             mAppStartInfoTracker.addTimestampToStart(app, forkTimeNs,
                     ApplicationStartInfo.START_TIMESTAMP_FORK);
+
+            if ((hostingRecord.getType() != null)
+                    && (hostingRecord.getType().equals("activity")
+                            || hostingRecord.getType().equals("pre-top-activity")
+                            || hostingRecord.getType().equals("next-top-activity"))) {
+                if (startResult != null) {
+                    // EPIC task_boost
+                    int value = startResult.pid;
+                    int usec = 2000000;
+
+                    mScenario = new Request(100400);
+                    mScenario.acquire_lock(value, usec);
+                }
+            }
 
             if (!regularZygote) {
                 // webview and app zygote don't have the permission to create the nodes
