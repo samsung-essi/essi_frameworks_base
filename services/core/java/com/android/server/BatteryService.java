@@ -20,6 +20,7 @@ import static android.os.Flags.batteryServiceSupportCurrentAdbCommand;
 import static android.os.Flags.stateOfHealthPublic;
 
 import static com.android.internal.logging.nano.MetricsProto.MetricsEvent;
+import static com.android.server.health.Utils.copySehV1Battery;
 import static com.android.server.health.Utils.copyV1Battery;
 
 import static java.lang.Math.abs;
@@ -41,6 +42,7 @@ import android.database.ContentObserver;
 import android.hardware.health.HealthInfo;
 import android.hardware.health.V2_1.BatteryCapacityLevel;
 import android.metrics.LogMaker;
+import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.BatteryManagerInternal;
 import android.os.BatteryProperty;
@@ -83,11 +85,14 @@ import com.android.internal.os.SomeArgs;
 import com.android.internal.util.DumpUtils;
 import com.android.server.am.BatteryStatsService;
 import com.android.server.health.HealthServiceWrapper;
+import com.android.server.health.SehHealthServiceWrapper;
 import com.android.server.lights.LightsManager;
 import com.android.server.lights.LogicalLight;
 
 import org.lineageos.internal.notification.LedValues;
 import org.lineageos.internal.notification.LineageBatteryLights;
+
+import vendor.samsung.hardware.health.SehHealthInfo;
 
 import java.io.File;
 import java.io.FileDescriptor;
@@ -374,6 +379,101 @@ public final class BatteryService extends SystemService {
 
     private LineageBatteryLights mLineageBatteryLights;
 
+    // ------------------------------------------------------------------------
+    // Samsung extended battery (SehHealth) support
+    // ------------------------------------------------------------------------
+
+    private static final String ACTION_SEC_BATTERY_EVENT =
+            "com.samsung.server.BatteryService.action.SEC_BATTERY_EVENT";
+    private static final String ACTION_SEC_BATTERY_WATER_IN_CONNECTOR =
+            "com.samsung.server.BatteryService.action.SEC_BATTERY_WATER_IN_CONNECTOR";
+    private static final String ACTION_WIRELESS_POWER_SHARING_ENABLED =
+            "com.samsung.server.BatteryService.action.WIRELESS_POWER_SHARING_ENABLED";
+    private static final String ACTION_WIRELESS_POWER_SHARING_CONNECTED =
+            "com.samsung.server.BatteryService.action.WIRELESS_POWER_SHARING_CONNECTED";
+    private static final String ACTION_WIRELESS_POWER_SHARING_TX_EVENT =
+            "com.samsung.server.BatteryService.action.WIRELESS_POWER_SHARING_TX_EVENT";
+
+    // Samsung sysfs nodes used for charging feature toggles
+    private static final String[] ADAPTIVE_FAST_CHARGING_DISABLE_SYSFS_PATHS = {
+            "/sys/class/sec/switch/afc_disable", "/sys/class/sec/afc/afc_disable" };
+    private static final String SUPER_FAST_CHARGING_DISABLE_SYSFS =
+            "/sys/class/power_supply/battery/pd_disable";
+    private static final String WIRELESS_FAST_CHARGING_SYSFS =
+            "/sys/class/power_supply/battery/batt_hv_wireless_pad_ctrl";
+
+    // User setting keys (Settings.System) for the charging speed toggles
+    private static final String SETTING_ADAPTIVE_FAST_CHARGING = "adaptive_fast_charging";
+    private static final String SETTING_SUPER_FAST_CHARGING = "super_fast_charging";
+    private static final String SETTING_WIRELESS_FAST_CHARGING = "wireless_fast_charging";
+
+    // Battery protection (charge limiting). Nodes are Samsung specific.
+    // The persistent /efs copies survive reboots at the kernel/firmware level.
+    private static final String BATT_FULL_CAPACITY_SYSFS =
+            "/sys/class/power_supply/battery/batt_full_capacity";
+    private static final String BATT_FULL_CAPACITY_EFS = "/efs/Battery/batt_full_capacity";
+    private static final String BATT_SOC_RECHG_SYSFS =
+            "/sys/class/power_supply/battery/batt_soc_rechg";
+    private static final String BATT_SOC_RECHG_EFS = "/efs/Battery/batt_soc_rechg";
+    // Settings.Global keys: protect_battery is the mode (0 = off, 1 = limit to threshold);
+    // battery_protection_threshold is the target charge level in percent.
+    private static final String SETTING_PROTECT_BATTERY = "protect_battery";
+    private static final String SETTING_PROTECTION_THRESHOLD = "battery_protection_threshold";
+    private static final int PROTECT_BATTERY_MODE_OFF = 0;
+    private static final int PROTECT_BATTERY_MODE_LIMIT = 1;
+    private static final int PROTECTION_THRESHOLD_DEFAULT = 80;
+
+    // Bits in SehHealthInfo#wirelessPowerSharingTxEvent.
+    private static final int WPS_TX_EVENT_ENABLED = 1 << 0;
+    private static final int WPS_TX_EVENT_CONNECTED = 1 << 1;
+    // Bit in SehHealthInfo#batteryEvent.
+    private static final int SEC_BATTERY_EVENT_WATER = 1 << 0;
+
+    /** Whether the wireless fast charge control node exists on this device. */
+    private final boolean mWirelessFastChargerControlSupported =
+            BattUtils.isFileSupported(WIRELESS_FAST_CHARGING_SYSFS);
+
+    /** Whether the battery protection (charge limit) node exists on this device. */
+    private final boolean mBatteryProtectionSupported =
+            BattUtils.isFileSupported(BATT_FULL_CAPACITY_SYSFS);
+    private int mProtectBatteryMode;
+    private int mMaximumProtectionThreshold = PROTECTION_THRESHOLD_DEFAULT;
+
+    /** Optional Samsung extended health HAL. {@code null} when unavailable. */
+    private SehHealthServiceWrapper mSehHealthServiceWrapper;
+    private SehHealthInfo mSehHealthInfo;
+    private final SehHealthInfo mLastSehHealthInfo = new SehHealthInfo();
+
+    // Charging feature param offsets, read from bootloader properties (-1 if unsupported).
+    private final int mSuperFastChargingOffset;
+    private final int mWirelessFastChargingOffset;
+    private final int mAdaptiveFastChargingOffset;
+    // Resolved AFC disable sysfs node, or null if AFC is unsupported on this device.
+    private final String mAfcDisableSysFs;
+
+    // Charging feature user settings (default enabled).
+    private boolean mAdaptiveFastChargingSettingsEnable = true;
+    private boolean mSuperFastChargingSettingsEnable = true;
+    private boolean mWirelessFastChargingSettingsEnable = true;
+
+    // Last broadcast SEC battery event values.
+    private int mLastBroadcastBatteryOnline;
+    private int mLastBroadcastBatteryChargeType;
+    private boolean mLastBroadcastBatteryPowerSharingOnline;
+    private int mLastBroadcastBatteryHighVoltageCharger;
+    private boolean mLastBroadcastChargerPogoOnline;
+    private int mLastBroadcastBatteryEvent;
+    private int mLastBroadcastBatteryCurrentEvent;
+    private boolean mLastBroadcastWaterInConnector;
+    private boolean mIsFirstSecBatteryEvent = true;
+
+    // Last broadcast wireless power sharing values.
+    private boolean mLastTxEventTxEnabled;
+    private boolean mLastTxEventRxConnected;
+    private int mLastWirelessPowerSharingTxEvent = -1;
+
+    private SettingsObserver mSettingsObserver;
+
     private static final int MSG_BROADCAST_BATTERY_CHANGED = 1;
     private static final int MSG_BROADCAST_POWER_CONNECTION_CHANGED = 2;
     private static final int MSG_BROADCAST_BATTERY_LOW_OKAY = 3;
@@ -502,6 +602,22 @@ public final class BatteryService extends SystemService {
         }
 
         mBatteryInputSuspended = PowerProperties.battery_input_suspended().orElse(false);
+
+        // Samsung charging feature param offsets, provided by the bootloader.
+        mSuperFastChargingOffset = SystemProperties.getInt("ro.boot.pd.param.offset", -1);
+        mWirelessFastChargingOffset = SystemProperties.getInt("ro.boot.cm.param.offset", -1);
+        mAdaptiveFastChargingOffset =
+                mWirelessFastChargingOffset != -1 ? mWirelessFastChargingOffset + 1 : -1;
+
+        // Resolve the adaptive fast charging disable node for this device, if any.
+        String afcDisableSysFs = null;
+        for (String path : ADAPTIVE_FAST_CHARGING_DISABLE_SYSFS_PATHS) {
+            if (BattUtils.isFileSupported(path)) {
+                afcDisableSysFs = path;
+                break;
+            }
+        }
+        mAfcDisableSysFs = afcDisableSysFs;
     }
 
     @Override
@@ -533,6 +649,13 @@ public final class BatteryService extends SystemService {
                         Settings.Global.LOW_POWER_MODE_TRIGGER_LEVEL),
                         false, obs, UserHandle.USER_ALL);
                 updateBatteryWarningLevelLocked();
+
+                // Samsung charging speed toggles need the extended health HAL; battery
+                // protection is a self-contained sysfs feature.
+                if (mSehHealthServiceWrapper != null || mBatteryProtectionSupported) {
+                    mSettingsObserver = new SettingsObserver(mHandler);
+                    mSettingsObserver.observe();
+                }
             }
         } else if (phase == PHASE_BOOT_COMPLETED) {
             mLineageBatteryLights = new LineageBatteryLights(mContext,
@@ -558,6 +681,20 @@ public final class BatteryService extends SystemService {
         } catch (NoSuchElementException ex) {
             Slog.e(TAG, "health: cannot register callback. (no supported health HAL service)");
             throw ex;
+        } finally {
+            traceEnd();
+        }
+
+        // Optionally register for Samsung extended health updates. This is not available on
+        // non-Samsung devices, in which case all Samsung specific battery features stay disabled.
+        traceBegin("SehHealthInitWrapper");
+        try {
+            mSehHealthServiceWrapper = SehHealthServiceWrapper.create(this::updateSeh);
+        } catch (RemoteException ex) {
+            Slog.w(TAG, "seh health: cannot register callback. (RemoteException)");
+        } catch (NoSuchElementException ex) {
+            Slog.i(TAG, "seh health: no supported Samsung health HAL service; "
+                    + "Samsung battery features disabled");
         } finally {
             traceEnd();
         }
@@ -762,6 +899,251 @@ public final class BatteryService extends SystemService {
             return BatteryManager.BATTERY_PLUGGED_DOCK;
         } else {
             return BATTERY_PLUGGED_NONE;
+        }
+    }
+
+    /**
+     * Samsung plug type. Additionally treats a connected pogo charger as AC.
+     */
+    private static int plugType(SehHealthInfo info) {
+        final HealthInfo aosp = info.aospHealthInfo;
+        if (aosp.chargerAcOnline) {
+            return BatteryManager.BATTERY_PLUGGED_AC;
+        } else if (aosp.chargerWirelessOnline) {
+            return BatteryManager.BATTERY_PLUGGED_WIRELESS;
+        } else if (aosp.chargerUsbOnline) {
+            return BatteryManager.BATTERY_PLUGGED_USB;
+        } else if (info.chargerPogoOnline) {
+            return BatteryManager.BATTERY_PLUGGED_AC;
+        } else if (aosp.chargerDockOnline) {
+            return BatteryManager.BATTERY_PLUGGED_DOCK;
+        }
+        return BATTERY_PLUGGED_NONE;
+    }
+
+    /**
+     * Called by the Samsung extended health HAL when {@link SehHealthInfo} changes. The standard
+     * AOSP battery state continues to be handled independently by {@link #update} and
+     * {@link #processValuesLocked}; this only handles the Samsung specific extras.
+     *
+     * @param info the new Samsung extended health info
+     */
+    @VisibleForTesting
+    public void updateSeh(SehHealthInfo info) {
+        traceBegin("SehHealthInfoUpdate");
+        synchronized (mLock) {
+            if (!mUpdatesStopped) {
+                mSehHealthInfo = info;
+                processSecValuesLocked();
+            } else {
+                copySehV1Battery(mLastSehHealthInfo, info);
+            }
+        }
+        traceEnd();
+    }
+
+    private void processSecValuesLocked() {
+        // mHealthInfo is populated by the AOSP health callback; it may not have arrived yet.
+        if (mSehHealthInfo == null || mHealthInfo == null) {
+            return;
+        }
+        sendSecBatteryEventIntentLocked();
+        sendWirelessPowerSharingIntentLocked();
+    }
+
+    private void sendSecBatteryEventIntentLocked() {
+        final SehHealthInfo info = mSehHealthInfo;
+        final boolean changed = mIsFirstSecBatteryEvent
+                || info.batteryOnline != mLastBroadcastBatteryOnline
+                || info.batteryChargeType != mLastBroadcastBatteryChargeType
+                || info.batteryPowerSharingOnline != mLastBroadcastBatteryPowerSharingOnline
+                || info.batteryHighVoltageCharger != mLastBroadcastBatteryHighVoltageCharger
+                || info.chargerPogoOnline != mLastBroadcastChargerPogoOnline
+                || info.batteryEvent != mLastBroadcastBatteryEvent
+                || info.batteryCurrentEvent != mLastBroadcastBatteryCurrentEvent;
+        if (changed) {
+            final Intent intent = new Intent(ACTION_SEC_BATTERY_EVENT);
+            intent.addFlags(Intent.FLAG_RECEIVER_REPLACE_PENDING
+                    | Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND);
+            intent.putExtra("misc_event", info.batteryEvent);
+            intent.putExtra("sec_plug_type", plugType(info));
+            intent.putExtra("online", info.batteryOnline);
+            intent.putExtra("charge_type", info.batteryChargeType);
+            intent.putExtra("power_sharing", info.batteryPowerSharingOnline);
+            intent.putExtra("hv_charger", info.batteryHighVoltageCharger != 0);
+            intent.putExtra("charger_type", info.batteryHighVoltageCharger);
+            intent.putExtra("pogo_plugged", info.chargerPogoOnline);
+            intent.putExtra("current_event", info.batteryCurrentEvent);
+            mHandler.post(() -> mContext.sendBroadcastAsUser(intent, UserHandle.ALL));
+
+            mLastBroadcastBatteryOnline = info.batteryOnline;
+            mLastBroadcastBatteryChargeType = info.batteryChargeType;
+            mLastBroadcastBatteryPowerSharingOnline = info.batteryPowerSharingOnline;
+            mLastBroadcastBatteryHighVoltageCharger = info.batteryHighVoltageCharger;
+            mLastBroadcastChargerPogoOnline = info.chargerPogoOnline;
+            mLastBroadcastBatteryEvent = info.batteryEvent;
+            mLastBroadcastBatteryCurrentEvent = info.batteryCurrentEvent;
+            mIsFirstSecBatteryEvent = false;
+        }
+
+        // Water-in-connector sub-event.
+        final boolean water = (info.batteryEvent & SEC_BATTERY_EVENT_WATER) != 0;
+        if (water != mLastBroadcastWaterInConnector) {
+            final Intent intent = new Intent(ACTION_SEC_BATTERY_WATER_IN_CONNECTOR);
+            intent.addFlags(Intent.FLAG_RECEIVER_REPLACE_PENDING
+                    | Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND);
+            intent.putExtra("water", water);
+            mHandler.post(() -> mContext.sendBroadcastAsUser(intent, UserHandle.ALL));
+            mLastBroadcastWaterInConnector = water;
+        }
+    }
+
+    private void sendWirelessPowerSharingIntentLocked() {
+        final int txEvent = mSehHealthInfo.wirelessPowerSharingTxEvent;
+
+        final boolean txEnabled = (txEvent & WPS_TX_EVENT_ENABLED) != 0;
+        if (txEnabled != mLastTxEventTxEnabled) {
+            final Intent intent = new Intent(ACTION_WIRELESS_POWER_SHARING_ENABLED);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            intent.putExtra("enabled", txEnabled);
+            mHandler.post(() -> mContext.sendBroadcastAsUser(intent, UserHandle.ALL));
+            mLastTxEventTxEnabled = txEnabled;
+        }
+
+        final boolean rxConnected = (txEvent & WPS_TX_EVENT_CONNECTED) != 0;
+        if (rxConnected != mLastTxEventRxConnected) {
+            final Intent intent = new Intent(ACTION_WIRELESS_POWER_SHARING_CONNECTED);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            intent.putExtra("connected", rxConnected);
+            mHandler.post(() -> mContext.sendBroadcastAsUser(intent, UserHandle.ALL));
+            mLastTxEventRxConnected = rxConnected;
+        }
+
+        if (txEvent != mLastWirelessPowerSharingTxEvent) {
+            final Intent intent = new Intent(ACTION_WIRELESS_POWER_SHARING_TX_EVENT);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            intent.putExtra("tx_event", txEvent);
+            mHandler.post(() -> mContext.sendBroadcastAsUser(intent, UserHandle.ALL));
+            mLastWirelessPowerSharingTxEvent = txEvent;
+        }
+    }
+
+    private void setAdaptiveFastCharging(boolean enable) {
+        if (mSehHealthServiceWrapper != null) {
+            mSehHealthServiceWrapper.sehWriteEnableToParam(mAdaptiveFastChargingOffset, !enable);
+        }
+        if (mAfcDisableSysFs != null) {
+            BattUtils.writeNode(mAfcDisableSysFs, !enable);
+        }
+        Slog.d(TAG, "setAdaptiveFastCharging: " + enable);
+    }
+
+    private void setSuperFastCharging(boolean enable) {
+        if (mSehHealthServiceWrapper != null) {
+            mSehHealthServiceWrapper.sehWriteEnableToParam(mSuperFastChargingOffset, !enable);
+        }
+        BattUtils.writeNode(SUPER_FAST_CHARGING_DISABLE_SYSFS, !enable);
+        Slog.d(TAG, "setSuperFastCharging: " + enable);
+    }
+
+    private void setWirelessFastCharging(boolean enable) {
+        if (mSehHealthServiceWrapper != null) {
+            mSehHealthServiceWrapper.sehWriteEnableToParam(mWirelessFastChargingOffset, !enable);
+        }
+        BattUtils.writeNode(enable ? 2L : 1L, WIRELESS_FAST_CHARGING_SYSFS);
+        Slog.d(TAG, "setWirelessFastCharging: " + enable);
+    }
+
+    private void updateChargingSettings() {
+        final ContentResolver resolver = mContext.getContentResolver();
+
+        mAdaptiveFastChargingSettingsEnable = Settings.System.getIntForUser(
+                resolver, SETTING_ADAPTIVE_FAST_CHARGING, 1, UserHandle.USER_CURRENT) == 1;
+        setAdaptiveFastCharging(mAdaptiveFastChargingSettingsEnable);
+
+        mSuperFastChargingSettingsEnable = Settings.System.getIntForUser(
+                resolver, SETTING_SUPER_FAST_CHARGING, 1, UserHandle.USER_CURRENT) == 1;
+        setSuperFastCharging(mSuperFastChargingSettingsEnable);
+
+        if (mWirelessFastChargerControlSupported) {
+            mWirelessFastChargingSettingsEnable = Settings.System.getIntForUser(
+                    resolver, SETTING_WIRELESS_FAST_CHARGING, 1, UserHandle.USER_CURRENT) == 1;
+            setWirelessFastCharging(mWirelessFastChargingSettingsEnable);
+        }
+    }
+
+    private void updateBatteryProtectionSettings() {
+        final ContentResolver resolver = mContext.getContentResolver();
+        mProtectBatteryMode = Settings.Global.getInt(
+                resolver, SETTING_PROTECT_BATTERY, PROTECT_BATTERY_MODE_OFF);
+        mMaximumProtectionThreshold = Settings.Global.getInt(
+                resolver, SETTING_PROTECTION_THRESHOLD, PROTECTION_THRESHOLD_DEFAULT);
+        writeProtectBatteryValues();
+    }
+
+    /**
+     * Applies the current battery protection state to the charge limit sysfs/efs nodes. When the
+     * limit is active, charging stops at {@link #mMaximumProtectionThreshold} percent.
+     */
+    private void writeProtectBatteryValues() {
+        if (!mBatteryProtectionSupported) {
+            return;
+        }
+        Slog.i(TAG, "writeProtectBatteryValues: mode=" + mProtectBatteryMode
+                + " threshold=" + mMaximumProtectionThreshold);
+        if (mProtectBatteryMode == PROTECT_BATTERY_MODE_LIMIT) {
+            BattUtils.writeNode(BATT_FULL_CAPACITY_SYSFS, mMaximumProtectionThreshold + " OPTION");
+            BattUtils.writeNode((long) mMaximumProtectionThreshold, BATT_FULL_CAPACITY_EFS);
+        } else {
+            BattUtils.writeNode(100L, BATT_FULL_CAPACITY_SYSFS);
+            BattUtils.writeNode(100L, BATT_FULL_CAPACITY_EFS);
+        }
+        BattUtils.writeNode(0L, BATT_SOC_RECHG_SYSFS);
+        BattUtils.writeNode(0L, BATT_SOC_RECHG_EFS);
+    }
+
+    private final class SettingsObserver extends ContentObserver {
+        SettingsObserver(Handler handler) {
+            super(handler);
+        }
+
+        void observe() {
+            final ContentResolver resolver = mContext.getContentResolver();
+            if (mSehHealthServiceWrapper != null) {
+                resolver.registerContentObserver(
+                        Settings.System.getUriFor(SETTING_ADAPTIVE_FAST_CHARGING),
+                        false, this, UserHandle.USER_ALL);
+                resolver.registerContentObserver(
+                        Settings.System.getUriFor(SETTING_SUPER_FAST_CHARGING),
+                        false, this, UserHandle.USER_ALL);
+                if (mWirelessFastChargerControlSupported) {
+                    resolver.registerContentObserver(
+                            Settings.System.getUriFor(SETTING_WIRELESS_FAST_CHARGING),
+                            false, this, UserHandle.USER_ALL);
+                }
+                updateChargingSettings();
+            }
+            if (mBatteryProtectionSupported) {
+                resolver.registerContentObserver(
+                        Settings.Global.getUriFor(SETTING_PROTECT_BATTERY),
+                        false, this, UserHandle.USER_ALL);
+                resolver.registerContentObserver(
+                        Settings.Global.getUriFor(SETTING_PROTECTION_THRESHOLD),
+                        false, this, UserHandle.USER_ALL);
+                updateBatteryProtectionSettings();
+            }
+        }
+
+        @Override
+        public void onChange(boolean selfChange, Uri uri) {
+            final boolean protectionChanged = mBatteryProtectionSupported && uri != null
+                    && (uri.equals(Settings.Global.getUriFor(SETTING_PROTECT_BATTERY))
+                        || uri.equals(Settings.Global.getUriFor(SETTING_PROTECTION_THRESHOLD)));
+            if (protectionChanged) {
+                updateBatteryProtectionSettings();
+            } else if (mSehHealthServiceWrapper != null) {
+                updateChargingSettings();
+            }
         }
     }
 
@@ -1699,6 +2081,37 @@ public final class BatteryService extends SystemService {
                 pw.println("  Capacity level: " + mHealthInfo.batteryCapacityLevel);
                 pw.println("  Maximum capacity: " + mHealthInfo.batteryFullChargeUah);
                 pw.println("  Design capacity: " + mHealthInfo.batteryFullChargeDesignCapacityUah);
+                if (mSehHealthServiceWrapper != null) {
+                    pw.println("  Samsung extended health HAL: connected");
+                    final SehHealthInfo seh = mSehHealthInfo;
+                    if (seh != null) {
+                        pw.println("    battery current now: " + seh.batteryCurrentNow);
+                        pw.println("    battery online: " + seh.batteryOnline);
+                        pw.println("    charge type: " + seh.batteryChargeType);
+                        pw.println("    power sharing online: " + seh.batteryPowerSharingOnline);
+                        pw.println("    pogo online: " + seh.chargerPogoOnline);
+                        pw.println("    otg online: " + seh.chargerOtgOnline);
+                        pw.println("    hv charger: " + seh.batteryHighVoltageCharger);
+                        pw.println("    misc event: " + seh.batteryEvent);
+                        pw.println("    current event: " + seh.batteryCurrentEvent);
+                        pw.println("    wireless power sharing tx event: "
+                                + seh.wirelessPowerSharingTxEvent);
+                    }
+                    pw.println("    adaptive fast charging enabled: "
+                            + mAdaptiveFastChargingSettingsEnable + " (offset "
+                            + mAdaptiveFastChargingOffset + ", sysfs " + mAfcDisableSysFs + ")");
+                    pw.println("    super fast charging enabled: "
+                            + mSuperFastChargingSettingsEnable + " (offset "
+                            + mSuperFastChargingOffset + ")");
+                    pw.println("    wireless fast charging enabled: "
+                            + mWirelessFastChargingSettingsEnable + " (offset "
+                            + mWirelessFastChargingOffset + ", supported "
+                            + mWirelessFastChargerControlSupported + ")");
+                }
+                if (mBatteryProtectionSupported) {
+                    pw.println("  Battery protection: mode " + mProtectBatteryMode
+                            + ", threshold " + mMaximumProtectionThreshold + "%");
+                }
             } else {
                 Shell shell = new Shell();
                 shell.exec(mBinderService, null, fd, null, args, null, new ResultReceiver(null));

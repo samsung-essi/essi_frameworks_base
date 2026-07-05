@@ -16,6 +16,10 @@
 
 package com.android.server.health;
 
+import android.hardware.health.HealthInfo;
+
+import vendor.samsung.hardware.health.SehHealthInfo;
+
 /**
  * Utils for {@link om.android.server.BatteryService} to deal with health info structs.
  *
@@ -81,5 +85,54 @@ public class Utils {
         dst.batteryCapacityLevel = src.batteryCapacityLevel;
         dst.batteryChargeTimeToFullNowSeconds = src.batteryChargeTimeToFullNowSeconds;
         dst.batteryFullChargeDesignCapacityUah = src.batteryFullChargeDesignCapacityUah;
+    }
+
+    /**
+     * Copy battery fields of {@link vendor.samsung.hardware.health.SehHealthInfo}, including its
+     * embedded AOSP {@link android.hardware.health.HealthInfo} and the Samsung-specific
+     * extension fields layered on top of it.
+     *
+     * @param dst destination
+     * @param src source
+     */
+    public static void copySehV1Battery(SehHealthInfo dst, SehHealthInfo src) {
+        if (dst.aospHealthInfo == null) {
+            dst.aospHealthInfo = new HealthInfo();
+        }
+
+        HealthInfo dstAosp = dst.aospHealthInfo;
+        HealthInfo srcAosp = src.aospHealthInfo;
+
+        dstAosp.chargerAcOnline = srcAosp.chargerAcOnline;
+        dstAosp.chargerUsbOnline = srcAosp.chargerUsbOnline;
+        dstAosp.chargerWirelessOnline = srcAosp.chargerWirelessOnline;
+        dstAosp.maxChargingCurrentMicroamps = srcAosp.maxChargingCurrentMicroamps;
+        dstAosp.maxChargingVoltageMicrovolts = srcAosp.maxChargingVoltageMicrovolts;
+        dstAosp.batteryStatus = srcAosp.batteryStatus;
+        dstAosp.batteryHealth = srcAosp.batteryHealth;
+        dstAosp.batteryPresent = srcAosp.batteryPresent;
+        dstAosp.batteryLevel = srcAosp.batteryLevel;
+        dstAosp.batteryVoltageMillivolts = srcAosp.batteryVoltageMillivolts;
+        dstAosp.batteryTemperatureTenthsCelsius = srcAosp.batteryTemperatureTenthsCelsius;
+        dstAosp.batteryCurrentMicroamps = srcAosp.batteryCurrentMicroamps;
+        dstAosp.batteryCycleCount = srcAosp.batteryCycleCount;
+        dstAosp.batteryFullChargeUah = srcAosp.batteryFullChargeUah;
+        dstAosp.batteryChargeCounterUah = srcAosp.batteryChargeCounterUah;
+        dstAosp.batteryTechnology = srcAosp.batteryTechnology;
+        dstAosp.batteryCurrentAverageMicroamps = srcAosp.batteryCurrentAverageMicroamps;
+        dstAosp.batteryCapacityLevel = srcAosp.batteryCapacityLevel;
+        dstAosp.batteryChargeTimeToFullNowSeconds = srcAosp.batteryChargeTimeToFullNowSeconds;
+        dstAosp.batteryFullChargeDesignCapacityUah = srcAosp.batteryFullChargeDesignCapacityUah;
+
+        dst.batteryCurrentNow = src.batteryCurrentNow;
+        dst.batteryOnline = src.batteryOnline;
+        dst.batteryChargeType = src.batteryChargeType;
+        dst.batteryPowerSharingOnline = src.batteryPowerSharingOnline;
+        dst.chargerPogoOnline = src.chargerPogoOnline;
+        dst.batteryHighVoltageCharger = src.batteryHighVoltageCharger;
+        dst.batteryEvent = src.batteryEvent;
+        dst.batteryCurrentEvent = src.batteryCurrentEvent;
+        dst.chargerOtgOnline = src.chargerOtgOnline;
+        dst.wirelessPowerSharingTxEvent = src.wirelessPowerSharingTxEvent;
     }
 }

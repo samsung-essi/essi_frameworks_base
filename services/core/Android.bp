@@ -193,6 +193,7 @@ java_library_static {
         "android.hardware.health-V2.1-java", // HIDL
         "android.hardware.health-V4-java", // AIDL
         "android.hardware.health-translate-java",
+        "vendor.samsung.hardware.health.framework-V1-java", // AIDL (Samsung extended health)
         "android.hardware.light-V1-java",
         "android.hardware.security.authgraph-V1-java",
         "android.hardware.security.rkp-V3-java",
