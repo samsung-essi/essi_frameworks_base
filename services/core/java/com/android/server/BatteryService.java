@@ -876,13 +876,15 @@ public final class BatteryService extends SystemService {
         Trace.traceCounter(Trace.TRACE_TAG_POWER, "BatteryStatus", info.batteryStatus);
 
         synchronized (mLock) {
-            if (!mUpdatesStopped) {
-                mHealthInfo = info;
-                // Process the new values.
-                processValuesLocked(false);
-                mConditionVariable.open();
-            } else {
-                copyV1Battery(mLastHealthInfo, info);
+            if (mSehHealthServiceWrapper == null) {
+                if (!mUpdatesStopped) {
+                    mHealthInfo = info;
+                    // Process the new values.
+                    processValuesLocked(false);
+                    mConditionVariable.open();
+                } else {
+                    copyV1Battery(mLastHealthInfo, info);
+                }
             }
         }
         traceEnd();
@@ -934,7 +936,11 @@ public final class BatteryService extends SystemService {
         synchronized (mLock) {
             if (!mUpdatesStopped) {
                 mSehHealthInfo = info;
+                mHealthInfo = info.aospHealthInfo;
+                // Process the AOSP battery state and the Samsung specific extras.
+                processValuesLocked(false);
                 processSecValuesLocked();
+                mConditionVariable.open();
             } else {
                 copySehV1Battery(mLastSehHealthInfo, info);
             }
@@ -1901,7 +1907,7 @@ public final class BatteryService extends SystemService {
                 }
                 try {
                     if (!mUpdatesStopped) {
-                        copyV1Battery(mLastHealthInfo, mHealthInfo);
+                        saveLastHealthInfoLocked();
                     }
                     boolean update = true;
                     switch (key) {
@@ -1990,9 +1996,35 @@ public final class BatteryService extends SystemService {
         }
     }
 
+    /**
+     * Snapshots the current live health state so it can be restored by {@link #resetBattery}. When
+     * the Samsung extended health HAL is present, the whole {@link SehHealthInfo} (including its
+     * embedded AOSP health info) is captured with {@code copySehV1Battery}; otherwise only the AOSP
+     * health info is captured.
+     */
+    private void saveLastHealthInfoLocked() {
+        if (mSehHealthServiceWrapper != null && mSehHealthInfo != null) {
+            copySehV1Battery(mLastSehHealthInfo, mSehHealthInfo);
+        } else {
+            copyV1Battery(mLastHealthInfo, mHealthInfo);
+        }
+    }
+
+    /**
+     * Restores the live health state snapshotted by {@link #saveLastHealthInfoLocked}.
+     */
+    private void restoreLastHealthInfoLocked() {
+        if (mSehHealthServiceWrapper != null && mSehHealthInfo != null) {
+            copySehV1Battery(mSehHealthInfo, mLastSehHealthInfo);
+            mHealthInfo = mSehHealthInfo.aospHealthInfo;
+        } else {
+            copyV1Battery(mHealthInfo, mLastHealthInfo);
+        }
+    }
+
     private void setChargerAcOnline(boolean online, boolean forceUpdate) {
         if (!mUpdatesStopped) {
-            copyV1Battery(mLastHealthInfo, mHealthInfo);
+            saveLastHealthInfoLocked();
         }
         mHealthInfo.chargerAcOnline = online;
         mUpdatesStopped = true;
@@ -2001,7 +2033,7 @@ public final class BatteryService extends SystemService {
 
     private void setBatteryLevel(int level, boolean forceUpdate) {
         if (!mUpdatesStopped) {
-            copyV1Battery(mLastHealthInfo, mHealthInfo);
+            saveLastHealthInfoLocked();
         }
         mHealthInfo.batteryLevel = level;
         mUpdatesStopped = true;
@@ -2010,7 +2042,7 @@ public final class BatteryService extends SystemService {
 
     private void unplugBattery(boolean forceUpdate, PrintWriter pw) {
         if (!mUpdatesStopped) {
-            copyV1Battery(mLastHealthInfo, mHealthInfo);
+            saveLastHealthInfoLocked();
         }
         mHealthInfo.chargerAcOnline = false;
         mHealthInfo.chargerUsbOnline = false;
@@ -2023,7 +2055,7 @@ public final class BatteryService extends SystemService {
     private void resetBattery(boolean forceUpdate, @Nullable PrintWriter pw) {
         if (mUpdatesStopped) {
             mUpdatesStopped = false;
-            copyV1Battery(mHealthInfo, mLastHealthInfo);
+            restoreLastHealthInfoLocked();
             Binder.withCleanCallingIdentity(() -> processValuesLocked(forceUpdate, pw));
         }
         if (mBatteryInputSuspended) {
