@@ -1063,7 +1063,9 @@ public final class BatteryService extends SystemService {
 
         mSuperFastChargingSettingsEnable = Settings.System.getIntForUser(
                 resolver, SETTING_SUPER_FAST_CHARGING, 1, UserHandle.USER_CURRENT) == 1;
-        setSuperFastCharging(mSuperFastChargingSettingsEnable);
+        // Super fast charging requires adaptive fast charging; it is only applied when both are on.
+        setSuperFastCharging(
+                mAdaptiveFastChargingSettingsEnable && mSuperFastChargingSettingsEnable);
 
         if (mWirelessFastChargerControlSupported) {
             mWirelessFastChargingSettingsEnable = Settings.System.getIntForUser(
